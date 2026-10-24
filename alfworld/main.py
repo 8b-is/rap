@@ -42,7 +42,7 @@ elif 'gpt' in args.model:
     #openai
     import openai
     from openai import OpenAI
-    os.environ["OPENAI_API_KEY"] = open('OpenAI_api_key.txt').readline()
+    os.environ["OPENAI_API_KEY"] = open('OpenAI_api_key.txt').readline().strip()
     openai.api_key = os.environ["OPENAI_API_KEY"]
     client = OpenAI()
     
@@ -168,7 +168,7 @@ def generate_examples(query, memory, embeddings, k=3, for_plan=False, act_len=0,
             log_embeddings = emb[1::2]
         cos_scores = cos_sim(query_embeddings, log_embeddings).numpy()
         ret_scores.append(np.max(cos_scores))
-        ret_index.append(np.argmax(cos_scores)*2)
+        ret_index.append(np.argmax(cos_scores) * 2 + (1 if mode == 'obs' else 0))
     ret_scores = torch.FloatTensor(ret_scores)
     # retrieve examples for action or action plan
     _, hits = torch.topk(ret_scores+cos_scores_sum, k=k)

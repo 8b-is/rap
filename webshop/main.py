@@ -359,18 +359,22 @@ def generate_examples(info, actions, memory, embeddings, reasoning='', k=3, act_
     if cos_scores is not None:
       if act_len > 0 and reasoning != '' and 'Actions' in embeddings:
         ret_scores, ret_index, intra_scores = [], [], []
-        query_embedding = model_embedding.encode([reasoning])
+        if use_act_obs:
+          if actions[-2].replace('Action: ', '').startswith('think'):
+            query_embedding = model_embedding.encode([actions[-2].replace('Action: ', '')])
+          else:
+            query_embedding = model_embedding.encode([actions[-1].replace('Observation: ', '')])
+        else:
+          query_embedding = model_embedding.encode([reasoning])
         for a, emb in enumerate(embeddings['Actions']):
           if use_act_obs:
             if actions[-2].replace('Action: ', '').startswith('think'):
               #print('ret word act:',actions[-2].replace('Action: ', ''))
-              query_embedding = model_embedding.encode([actions[-2].replace('Action: ', '')])
               cos_scores_act = cos_sim(query_embedding, emb[::2]).numpy()
               ret_scores.append(np.max(cos_scores_act))
               ret_index.append(np.argmax(cos_scores_act)*2)
             else:
               #print('ret word obs:',actions[-1].replace('Observation: ', ''))
-              query_embedding = model_embedding.encode([actions[-1].replace('Observation: ', '')])
               cos_scores_act = cos_sim(query_embedding, emb[1::2]).numpy()
               ret_scores.append(np.max(cos_scores_act))
               ret_index.append(np.argmax(cos_scores_act)*2+1)
