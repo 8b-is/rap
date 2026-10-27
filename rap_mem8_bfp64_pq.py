@@ -1,34 +1,26 @@
-"""
-================================================================================
-[8b-is Sovereign Panasonic Connect RAP Substrate — Omni BFP-64 Contextual
- Memory Bank + MEM|8 Precomputed Integer Cosine Recall & p/q Reward Scaling]
+"""Standalone BFP-64 episodic-memory prototype with integer cosine scoring.
 
-Connects Panasonic Connect's RAP ("Retrieval-Augmented Planning with Contextual
-Memory for Multimodal LLM Agents") with the 8b-is conditional & episodic memory stack:
-- https://github.com/8b-is/far      (Omni BFP-64 + MEM|8 adaptive episodic key bank)
-- https://github.com/8b-is/Engram   (Omni BFP-64 + Lemire p/q conditional memory)
-- https://github.com/8b-is/alexiai  (GAIA-MLX-QUANT b1.58 + p/q + MEM|8 substrate)
+The ALFWorld and WebShop benchmark scripts do not import this module; they use
+sentence-transformer embeddings and their own retrieval functions. Related design
+references include https://github.com/8b-is/far, https://github.com/8b-is/Engram,
+and https://github.com/8b-is/alexiai. No integration with those projects is provided
+by this module.
 
-Key Bugfixes & Mathematical Upgrades for RAP (`alfworld` & `webshop`):
-1. Bugfix in `alfworld/main.py`:
-   When `mode == 'obs'`, `log_embeddings = emb[1::2]` selects odd observation
-   indices, but `ret_index.append(np.argmax(cos_scores)*2)` returned even action
-   indices (off-by-one window alignment). Fixed to `* 2 + (1 if mode == 'obs' else 0)`.
-2. Bugfix in `webshop/main.py`:
-   When `use_act_obs == True`, `model_embedding.encode(...)` was called inside the
-   `for a, emb in enumerate(embeddings['Actions']):` loop, re-running the Transformer
-   encoder `M` times on the identical query string! Hoisted out of the loop (`M/1x`
-   encoder speedup).
-3. Omni BFP-64 Contextual Memory Bank (`RapContextualMemoryBfp64Pq`):
-   Compresses `all-MiniLM-L6-v2` (384-dim) / `L12-v2` Task, Category, Plan, and
-   Action/Observation trajectory embeddings from `1536 B` (FP32) to `390 B` (6 blocks
-   of 64 int8 mantissas + 6 int8 shared exponents = `256/65 ~= 63/16x` compression).
-4. Scale-Invariant Precomputed Integer Cosine Recall (`isqrt_u128`):
-   Each stored memory vector precomputes a fixed-point reciprocal L2 norm
-   with adaptive precision once on insertion via `math.isqrt`. Multi-cue retrieval across
-   `Task + Category + Plan + max_{t}(Actions/Obs)` executes in pure integer dot
-   products with ZERO square roots and ZERO floating-point divisions at query time!
-================================================================================
+Rows quantize float inputs in blocks of at most 64 values, then store aligned
+mantissas as Python integers with an adaptive-precision reciprocal norm. A packed
+layout with one byte per mantissa and one byte per block exponent would use
+390 bytes for 384 values, versus 1536 bytes for FP32. ``raw_block_bytes`` and
+``compression_ratio_pq`` describe that hypothetical payload only; this module
+neither serializes that layout nor measures Python object memory usage. Cached
+norms, alignment metadata and Python container overhead are excluded.
+
+``cosine_q30`` uses integer arithmetic on already quantized rows. Insertion and
+query preparation through ``from_floats`` use floating-point quantization and an
+integer square root to build each reciprocal norm. Quantization is lossy, and
+cosine scores are approximations rather than exact cosines of the float inputs.
+
+Episodes live in a process-local list with no persistence, update or deletion API.
+``reward_pq`` is stored as a reduced rational but does not affect retrieval scores.
 """
 
 from __future__ import annotations
@@ -70,7 +62,7 @@ class Bfp64EmbeddingRowPq:
     aligned_mantissas: Tuple[int, ...]
     min_exp: int
     inv_norm_q30: int
-    raw_block_bytes: int
+    raw_block_bytes: int  # Hypothetical packed payload, not Python object size.
     # The reciprocal is inv_norm_q30 / 2**(30 + inv_norm_extra_bits).
     inv_norm_extra_bits: int = 0
 
@@ -144,7 +136,7 @@ class Bfp64EmbeddingRowPq:
 
 @dataclass
 class RapEpisodeEntryPq:
-    """Single RAP episodic trajectory stored in Omni BFP-64."""
+    """One in-memory episode containing quantized Python row objects."""
 
     episode_id: str
     task_emb: Bfp64EmbeddingRowPq
@@ -156,7 +148,9 @@ class RapEpisodeEntryPq:
 
 class RapContextualMemoryBfp64Pq:
     """
-    Zero-float p/q + Omni BFP-64 Contextual Memory Bank for RAP (`alfworld` & `webshop`).
+    In-memory prototype accepting float vectors and ranking quantized rows.
+
+    The benchmark scripts use separate retrieval implementations.
     """
 
     def __init__(self, dim: int = 384):
@@ -193,6 +187,10 @@ class RapContextualMemoryBfp64Pq:
         )
 
     def compression_ratio_pq(self) -> Tuple[int, int]:
+        """Return FP32 / hypothetical packed-payload ratio, excluding metadata.
+
+        This is a size calculation, not measured compression of Python objects.
+        """
         num_blocks = (self.dim + BFP_BLOCK_SIZE - 1) // BFP_BLOCK_SIZE
         fp32_b = self.dim * 4
         bfp_b = self.dim + num_blocks
@@ -211,6 +209,8 @@ class RapContextualMemoryBfp64Pq:
         Retrieve top-k episodes and matched step index `ret_index` with exact parity
         handling (`* 2` for `mode == 'act'`, `* 2 + 1` for `mode == 'obs'`).
         Returns list of `(episode_id, matched_step_index, score_pq_q30)`.
+        Float queries are quantized and normalized before integer scoring;
+        stored reward_pq values are not used in the score.
         """
         q_task = self._encode_vector(task_q, "task_q")
         q_cat = self._encode_vector(category_q, "category_q")
