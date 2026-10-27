@@ -82,6 +82,73 @@ class TestPanasonicRapMem8Bfp64Pq(unittest.TestCase):
         self.assertEqual(zero.cosine_q30(zero), 0)
         self.assertEqual(a.cosine_q30(b), 0)
 
+    def test_rows_reject_empty_and_nonfinite_vectors(self):
+        for vec in ([], [math.nan, 1.0], [1.0, math.nan],
+                    [math.inf, 1.0], [1.0, -math.inf]):
+            with self.subTest(vec=vec):
+                with self.assertRaises(ValueError):
+                    Bfp64EmbeddingRowPq.from_floats(vec)
+
+    def test_cosine_rejects_dimension_mismatch_before_zero_shortcut(self):
+        for a, b in (([1.0, 0.0], [1.0]), ([0.0, 0.0], [0.0]),
+                     ([0.0, 0.0], [1.0]), ([1.0, 0.0], [0.0])):
+            ra = Bfp64EmbeddingRowPq.from_floats(a)
+            rb = Bfp64EmbeddingRowPq.from_floats(b)
+            for left, right in ((ra, rb), (rb, ra)):
+                with self.subTest(a=a, b=b, reverse=left is rb):
+                    with self.assertRaises(ValueError):
+                        left.cosine_q30(right)
+
+    def test_bank_requires_positive_integer_dimension(self):
+        for dim in (0, -1, -384):
+            with self.subTest(dim=dim):
+                with self.assertRaises(ValueError):
+                    RapContextualMemoryBfp64Pq(dim=dim)
+        for dim in (True, False, 2.5, 2.0, "2"):
+            with self.subTest(dim=dim):
+                with self.assertRaises(TypeError):
+                    RapContextualMemoryBfp64Pq(dim=dim)
+        class IndexDimension:
+            def __index__(self):
+                return 2
+        self.assertEqual(RapContextualMemoryBfp64Pq(IndexDimension()).dim, 2)
+
+    def test_invalid_episode_vectors_leave_existing_memory_unchanged(self):
+        good = [1.0, 0.0]
+        bank = RapContextualMemoryBfp64Pq(dim=2)
+        bank.add_episode("existing", good, good, good, [good, good])
+        original = list(bank.episodes)
+        for field in ("task_vec", "category_vec", "plan_vec", "action_obs_vecs"):
+            for bad in ([], [1.0], [1.0, 0.0, 0.0], [math.nan, 0.0],
+                        [0.0, math.nan], [math.inf, 0.0], [0.0, -math.inf]):
+                kwargs = dict(task_vec=good, category_vec=good, plan_vec=good,
+                              action_obs_vecs=[good, good])
+                kwargs[field] = [good, bad] if field == "action_obs_vecs" else bad
+                with self.subTest(field=field, bad=bad):
+                    with self.assertRaises(ValueError):
+                        bank.add_episode("invalid", **kwargs)
+                    self.assertEqual(bank.episodes, original)
+                    self.assertIs(bank.episodes[0], original[0])
+        bank.add_episode("no_steps", good, good, good, [])
+        self.assertEqual(len(bank.episodes), 2)
+
+    def test_all_query_vectors_validated_even_when_memory_is_empty(self):
+        good = [1.0, 0.0]
+        for populated in (False, True):
+            bank = RapContextualMemoryBfp64Pq(dim=2)
+            if populated:
+                bank.add_episode("existing", good, good, good, [])
+            for field in ("task_q", "category_q", "plan_q", "step_q"):
+                for bad in ([], [1.0], [1.0, 0.0, 0.0], [math.nan, 0.0],
+                            [0.0, math.nan], [math.inf, 0.0], [0.0, -math.inf]):
+                    kwargs = dict(task_q=good, category_q=good)
+                    kwargs[field] = bad
+                    with self.subTest(populated=populated, field=field, bad=bad):
+                        with self.assertRaises(ValueError):
+                            bank.retrieve_topk(**kwargs)
+            hits = bank.retrieve_topk(good, good, plan_q=None, step_q=None)
+            self.assertEqual(len(hits), int(populated))
+
     def test_obs_vs_act_index_parity_and_topk_recall(self):
         rng = random.Random(202)
         dim = 128
