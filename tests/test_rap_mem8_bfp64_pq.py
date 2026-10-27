@@ -44,6 +44,44 @@ class TestPanasonicRapMem8Bfp64Pq(unittest.TestCase):
             cos_ref = _float_cosine(a, b)
             self.assertLess(abs(cos_int - cos_ref), 0.004)
 
+    def test_zero_blocks_preserve_cosine_and_relative_scale(self):
+        a = [1.0] * 64 + [2.0 ** -10] * 64
+        b = [1.0] * 64 + [0.0] * 64
+        for padding in ([], [0.0] * 1, [0.0] * 64, [0.0] * 128):
+            with self.subTest(padding=len(padding)):
+                ra = Bfp64EmbeddingRowPq.from_floats(a + padding)
+                rb = Bfp64EmbeddingRowPq.from_floats(b + padding)
+                self.assertAlmostEqual(ra.cosine_q30(rb) / PQ_Q30,
+                                       _float_cosine(a, b), delta=1e-8)
+
+    def test_wide_block_ranges_and_signed_cosine(self):
+        # Powers of two are exactly representable by the block quantizer.
+        for exponent in (-54, -30, 0, 30, 66):
+            for tail in (1, 63, 64):
+                a = [2.0 ** exponent] * 64 + [2.0 ** -54] * tail
+                b = [2.0 ** exponent] * 64 + [-2.0 ** -54] * tail
+                for sign in (-1, 1):
+                    with self.subTest(exponent=exponent, tail=tail, sign=sign):
+                        signed_b = [sign * x for x in b]
+                        ra = Bfp64EmbeddingRowPq.from_floats(a)
+                        rb = Bfp64EmbeddingRowPq.from_floats(signed_b)
+                        score = ra.cosine_q30(rb)
+                        self.assertLessEqual(abs(score), PQ_Q30)
+                        self.assertEqual(score, rb.cosine_q30(ra))
+                        self.assertAlmostEqual(score / PQ_Q30,
+                                               _float_cosine(a, signed_b), delta=1e-8)
+                        self.assertAlmostEqual(ra.cosine_q30(ra) / PQ_Q30,
+                                               1.0, delta=1e-8)
+
+    def test_zero_vectors_and_orthogonal_vectors(self):
+        zero = Bfp64EmbeddingRowPq.from_floats([0.0] * 128)
+        a = Bfp64EmbeddingRowPq.from_floats([1.0] * 64 + [0.0] * 64)
+        b = Bfp64EmbeddingRowPq.from_floats([0.0] * 64 + [1.0] * 64)
+        self.assertEqual(zero.cosine_q30(a), 0)
+        self.assertEqual(a.cosine_q30(zero), 0)
+        self.assertEqual(zero.cosine_q30(zero), 0)
+        self.assertEqual(a.cosine_q30(b), 0)
+
     def test_obs_vs_act_index_parity_and_topk_recall(self):
         rng = random.Random(202)
         dim = 128

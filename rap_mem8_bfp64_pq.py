@@ -24,8 +24,8 @@ Key Bugfixes & Mathematical Upgrades for RAP (`alfworld` & `webshop`):
    Action/Observation trajectory embeddings from `1536 B` (FP32) to `390 B` (6 blocks
    of 64 int8 mantissas + 6 int8 shared exponents = `256/65 ~= 63/16x` compression).
 4. Scale-Invariant Precomputed Integer Cosine Recall (`isqrt_u128`):
-   Each stored memory vector precomputes its exact integer reciprocal L2 norm
-   `inv_norm_q30` once on insertion via `math.isqrt`. Multi-cue retrieval across
+   Each stored memory vector precomputes a fixed-point reciprocal L2 norm
+   with adaptive precision once on insertion via `math.isqrt`. Multi-cue retrieval across
    `Task + Category + Plan + max_{t}(Actions/Obs)` executes in pure integer dot
    products with ZERO square roots and ZERO floating-point divisions at query time!
 ================================================================================
@@ -61,7 +61,7 @@ def isqrt_u128(n: int) -> int:
 @dataclass(frozen=True)
 class Bfp64EmbeddingRowPq:
     """
-    Omni BFP-64 quantized embedding with precomputed Q30 reciprocal L2 norm.
+    Omni BFP-64 embedding with an adaptive-precision reciprocal L2 norm.
     Since cosine similarity is scale-invariant, the shared block exponent cancels out
     when blocks are integer-aligned to `min_exp`.
     """
@@ -70,6 +70,8 @@ class Bfp64EmbeddingRowPq:
     min_exp: int
     inv_norm_q30: int
     raw_block_bytes: int
+    # The reciprocal is inv_norm_q30 / 2**(30 + inv_norm_extra_bits).
+    inv_norm_extra_bits: int = 0
 
     @classmethod
     def from_floats(cls, vec: Sequence[float]) -> "Bfp64EmbeddingRowPq":
@@ -95,35 +97,43 @@ class Bfp64EmbeddingRowPq:
         min_exp = min(block_exps)
         aligned: List[int] = []
         for m_blk, e in zip(block_mants, block_exps):
-            shift = max(0, min(16, e - min_exp))
+            # Python integers preserve the full (at most 120-bit) exponent gap.
+            shift = e - min_exp
             mult = 1 << shift
             aligned.extend(v * mult for v in m_blk)
 
         sum_sq = sum(v * v for v in aligned)
+        inv_norm_extra_bits = sum_sq.bit_length() // 2
         if sum_sq == 0:
             inv_norm_q30 = 0
         else:
             norm_q30 = max(1, isqrt_u128(sum_sq << 60))
-            inv_norm_q30 = ((1 << 60) + (norm_q30 >> 1)) // norm_q30
+            # Keep about 30 significant reciprocal bits even when alignment
+            # makes the integer norm much larger than 2**30.
+            inv_norm_q30 = ((1 << (60 + inv_norm_extra_bits)) + (norm_q30 >> 1)) // norm_q30
 
         return cls(
             aligned_mantissas=tuple(aligned),
             min_exp=min_exp,
             inv_norm_q30=inv_norm_q30,
             raw_block_bytes=dim + num_blocks,
+            inv_norm_extra_bits=inv_norm_extra_bits,
         )
 
     def cosine_q30(self, query_row: "Bfp64EmbeddingRowPq") -> int:
         """
-        Compute exact integer cosine similarity in Q30 [-2^30, +2^30] using
-        precomputed reciprocal L2 norms (zero division, zero sqrt!).
+        Approximate cosine of the quantized vectors in Q30 [-2^30, +2^30].
+        Scoring uses precomputed reciprocal norms without division or sqrt.
         """
         if self.inv_norm_q30 == 0 or query_row.inv_norm_q30 == 0:
             return 0
         dot = sum(a * b for a, b in zip(self.aligned_mantissas, query_row.aligned_mantissas))
-        # dot * inv_norm_a_q30 * inv_norm_b_q30 >> 30 -> Q30 cosine
-        prod_q60 = dot * self.inv_norm_q30 * query_row.inv_norm_q30
-        return prod_q60 >> 30
+        prod = dot * self.inv_norm_q30 * query_row.inv_norm_q30
+        shift = 30 + self.inv_norm_extra_bits + query_row.inv_norm_extra_bits
+        magnitude = (abs(prod) + (1 << (shift - 1))) >> shift
+        # Reciprocal rounding can put self-similarity a few units above Q30.
+        magnitude = min(PQ_Q30, magnitude)
+        return -magnitude if prod < 0 else magnitude
 
 
 @dataclass
