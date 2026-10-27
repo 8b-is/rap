@@ -120,6 +120,8 @@ with open('./prompts/alfworld_3prompts.json', 'r') as f:
     d_react = json.load(f)
 
 def generate_embeddings(memory):
+    if not memory:
+        return {}
     print('num_retrieval',len(memory))
     embeddings = {}
     for key in ['Task', 'Category', 'Plan', 'Actions']:
@@ -136,6 +138,9 @@ def generate_embeddings(memory):
     return embeddings
 
 def generate_examples(query, memory, embeddings, k=3, for_plan=False, act_len=0, mode='act', key=''):
+    k = min(k, len(memory))
+    if k <= 0:
+        return []
     # similarity on task, category, and plan
     cos_scores_sum = []
     for key_tmp in ['Task', 'Category', 'Plan']:

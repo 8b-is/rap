@@ -323,6 +323,8 @@ def generate_embeddings(memory):
     if config['params'].get('success', False):
       memory = [m for m in memory if m['Success']]
     print('num_retrieval',len(memory))
+    if not memory:
+        return memory, {}
     embeddings = {}
     for key in ['Instruction', 'Reward', 'Category', 'Query', 'Actions']:
         if key=='Actions' and 'Actions' in memory[0]:
@@ -342,6 +344,9 @@ def generate_embeddings(memory):
 
 
 def generate_examples(info, actions, memory, embeddings, reasoning='', k=3, act_len=0, use_act_obs=False):
+    k = min(k, len(memory))
+    if k <= 0:
+        return '', reasoning
     cos_scores=None
     # retrieve examples
     if info.get('instruction', None) is not None:
@@ -384,7 +389,7 @@ def generate_examples(info, actions, memory, embeddings, reasoning='', k=3, act_
             ret_scores.append(np.max(cos_scores_act))
             ret_index.append(np.argmax(cos_scores_act)*2)
           if config['params'].get('intra_task', False):
-            intra_scores.append(cos_sim(embeddings['Instruction'][a], emb[np.argmax(cos_scores_act)*2]).item())
+            intra_scores.append(cos_sim(embeddings['Instruction'][a], emb[ret_index[-1]]).item())
         ret_scores = torch.FloatTensor(ret_scores)
         if config['params'].get('intra_task', False):
           intra_scores = torch.FloatTensor(intra_scores)
