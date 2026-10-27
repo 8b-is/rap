@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import operator
 from typing import Dict, List, Optional, Sequence, Tuple
 
 BFP_BLOCK_SIZE: int = 64
@@ -76,7 +77,10 @@ class Bfp64EmbeddingRowPq:
     @classmethod
     def from_floats(cls, vec: Sequence[float]) -> "Bfp64EmbeddingRowPq":
         dim = len(vec)
-        assert dim > 0
+        if dim == 0:
+            raise ValueError("embedding must not be empty")
+        if not all(math.isfinite(v) for v in vec):
+            raise ValueError("embedding values must be finite")
         num_blocks = (dim + BFP_BLOCK_SIZE - 1) // BFP_BLOCK_SIZE
         block_mants: List[List[int]] = []
         block_exps: List[int] = []
@@ -125,6 +129,8 @@ class Bfp64EmbeddingRowPq:
         Approximate cosine of the quantized vectors in Q30 [-2^30, +2^30].
         Scoring uses precomputed reciprocal norms without division or sqrt.
         """
+        if len(self.aligned_mantissas) != len(query_row.aligned_mantissas):
+            raise ValueError("cosine requires embeddings of equal dimension")
         if self.inv_norm_q30 == 0 or query_row.inv_norm_q30 == 0:
             return 0
         dot = sum(a * b for a, b in zip(self.aligned_mantissas, query_row.aligned_mantissas))
@@ -154,8 +160,17 @@ class RapContextualMemoryBfp64Pq:
     """
 
     def __init__(self, dim: int = 384):
-        self.dim = int(dim)
+        if isinstance(dim, bool):
+            raise TypeError("dim must be an integer, not a boolean")
+        self.dim = operator.index(dim)
+        if self.dim <= 0:
+            raise ValueError("dim must be positive")
         self.episodes: List[RapEpisodeEntryPq] = []
+
+    def _encode_vector(self, vec: Sequence[float], name: str) -> Bfp64EmbeddingRowPq:
+        if len(vec) != self.dim:
+            raise ValueError(f"{name} must have dimension {self.dim}, got {len(vec)}")
+        return Bfp64EmbeddingRowPq.from_floats(vec)
 
     def add_episode(
         self,
@@ -169,10 +184,10 @@ class RapContextualMemoryBfp64Pq:
         self.episodes.append(
             RapEpisodeEntryPq(
                 episode_id=episode_id,
-                task_emb=Bfp64EmbeddingRowPq.from_floats(task_vec),
-                category_emb=Bfp64EmbeddingRowPq.from_floats(category_vec),
-                plan_emb=Bfp64EmbeddingRowPq.from_floats(plan_vec),
-                action_obs_embs=[Bfp64EmbeddingRowPq.from_floats(v) for v in action_obs_vecs],
+                task_emb=self._encode_vector(task_vec, "task_vec"),
+                category_emb=self._encode_vector(category_vec, "category_vec"),
+                plan_emb=self._encode_vector(plan_vec, "plan_vec"),
+                action_obs_embs=[self._encode_vector(v, "action_obs_vecs") for v in action_obs_vecs],
                 reward_pq=reduce_rational_pq(reward_pq[0], reward_pq[1]),
             )
         )
@@ -197,10 +212,10 @@ class RapContextualMemoryBfp64Pq:
         handling (`* 2` for `mode == 'act'`, `* 2 + 1` for `mode == 'obs'`).
         Returns list of `(episode_id, matched_step_index, score_pq_q30)`.
         """
-        q_task = Bfp64EmbeddingRowPq.from_floats(task_q)
-        q_cat = Bfp64EmbeddingRowPq.from_floats(category_q)
-        q_plan = Bfp64EmbeddingRowPq.from_floats(plan_q) if plan_q is not None else None
-        q_step = Bfp64EmbeddingRowPq.from_floats(step_q) if step_q is not None else None
+        q_task = self._encode_vector(task_q, "task_q")
+        q_cat = self._encode_vector(category_q, "category_q")
+        q_plan = self._encode_vector(plan_q, "plan_q") if plan_q is not None else None
+        q_step = self._encode_vector(step_q, "step_q") if step_q is not None else None
 
         scored: List[Tuple[int, str, int]] = []
         for ep in self.episodes:
