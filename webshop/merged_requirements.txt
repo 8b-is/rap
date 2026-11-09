@@ -18,7 +18,7 @@ requests==2.33.0
 requests_mock
 rich==12.4.4
 scikit_learn==1.1.1
-sentence_transformers==2.7.0
+sentence_transformers==5.6.0
 selenium==4.2.0
 spacy==3.7.5
 thefuzz==0.19.0
